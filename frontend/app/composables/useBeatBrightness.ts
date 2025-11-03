@@ -1,178 +1,212 @@
-import { ref, computed, onBeforeUnmount, watch, type Ref } from 'vue'
+// composables/useBeatBrightness.ts
+import {
+  ref,
+  computed,
+  watchEffect,
+  onBeforeUnmount,
+  type ShallowRef
+} from "vue"
 
-type Options = {
-  bassRange?: [number, number]     // fraction of spectrum [0..1]
-  midRange?: [number, number]
-  levelSmoothing?: number          // 0..1 smoothing
-  beatThresholdMul?: number        // beat sensitivity multiplier
-  beatCooldownMs?: number          // ms between beats
-  beatDecay?: number               // 0..1 decay for beatBoost
+type UseBeatBrightnessOptions = {
+  // ranges are fractions of the analyser frequency bins: 0..1
+  bassRange: [number, number]
+  midRange: [number, number]
+  beatThresholdMul?: number   // how many × above env to trigger
+  beatCooldownMs?: number     // min ms between beats
+
+  // 1) adaptive normalization
+  smoothingFactor?: number    // how fast smoothed bass/mid follow changes
+
+  // 2) initial ramp
+  rampDurationMs?: number     // how long to fade in visual sensitivity
+
+  // 4) log/curve compression
+  compressionGamma?: number   // < 1.0 = lifts quiet, tames peaks
 }
 
-/**
- * Reactive audio visualizer composable
- * Splits bass vs mids, smooths energy, and detects beats.
- */
-export function useBeatBrightness(
-  analyserRef: Ref<AnalyserNode | null>,
-  opts: Options = {}
-) {
-  const {
-    bassRange = [0.0, 0.12],
-    midRange = [0.12, 0.5],
-    levelSmoothing = 0.15,
-    beatThresholdMul = 1.4,
-    beatCooldownMs = 120,
-    beatDecay = 0.9,
-  } = opts
+const defaultOpts: Required<UseBeatBrightnessOptions> = {
+  bassRange: [0.0, 0.12],
+  midRange: [0.12, 0.5],
+  beatThresholdMul: 1.3,
+  beatCooldownMs: 110,
+  smoothingFactor: 0.05,
+  rampDurationMs: 1000,
+  compressionGamma: 0.7
+}
 
-  const bassLevel = ref(0)
-  const midLevel = ref(0)
-  const beatBoost = ref(0)
+export function useBeatBrightness(
+  analyserRef: ShallowRef<AnalyserNode | null>,
+  opts: UseBeatBrightnessOptions
+) {
+  const cfg = { ...defaultOpts, ...opts }
+
+  const bassLevel = ref(0)  // 0..1, visual bass (post-curve + ramp)
+  const midLevel = ref(0)   // 0..1, visual mids
+  const beatBoost = ref(0)  // extra boost on beats
   const isBeat = ref(false)
 
-  const rafId = ref<number | null>(null)
-  let dataArray: Uint8Array<ArrayBuffer> | null = null
+  // derived CSS filter for your DOM visualizer (can tweak)
+  const imageFilter = computed(() => {
+    const b = 1 + bassLevel.value * 0.4 + beatBoost.value * 0.3
+    const c = 1 + midLevel.value * 0.3
+    const s = 1 + beatBoost.value * 0.2
+    return `brightness(${b}) contrast(${c}) saturate(${s})`
+  })
 
-  // rolling average for beat detection
-  let bassRunningAvg = 0
+  // internal state for normalization & beat tracking
+  let freqArray: Uint8Array<ArrayBuffer> | null = null
+  let rafId: number | null = null
+
+  let smoothedBass = 0
+  let smoothedMid = 0
+  let beatEnv = 0
   let lastBeatTime = 0
+  let startTs: number | null = null
+
+  const EPS = 1e-4
+
+  const stopLoop = () => {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId)
+      rafId = null
+    }
+  }
 
   const loop = () => {
     const analyser = analyserRef.value
-    if (!analyser) {
-      rafId.value = null
+    if (!analyser || !freqArray) {
+      rafId = requestAnimationFrame(loop)
       return
     }
 
-    // ensure we have a valid buffer
-    if (
-      !dataArray ||
-      dataArray.length !== analyser.frequencyBinCount
-    ) {
-      dataArray = new Uint8Array(
-        analyser.frequencyBinCount
-      ) as Uint8Array<ArrayBuffer>
-    }
-
-    // guard: if still null or empty, skip frame
-    if (!dataArray || dataArray.length === 0) {
-      rafId.value = requestAnimationFrame(loop)
+    analyser.getByteFrequencyData(freqArray)
+    const n = analyser.frequencyBinCount
+    if (n === 0) {
+      rafId = requestAnimationFrame(loop)
       return
     }
 
-    analyser.getByteFrequencyData(dataArray)
+    // --- compute band energies ---
+    const [bassStartFrac, bassEndFrac] = cfg.bassRange
+    const [midStartFrac, midEndFrac] = cfg.midRange
 
-    const bins = dataArray.length
+    const bassStart = Math.max(0, Math.floor(bassStartFrac * n))
+    const bassEnd = Math.max(bassStart + 1, Math.floor(bassEndFrac * n))
+    const midStart = Math.max(0, Math.floor(midStartFrac * n))
+    const midEnd = Math.max(midStart + 1, Math.floor(midEndFrac * n))
 
-    // --- helper: safely average a frequency band ---
-    const avgBand = (range: [number, number]) => {
-      const [startFrac, endFrac] = range
-      let start = Math.floor(startFrac * bins)
-      let end = Math.floor(endFrac * bins)
-      if (end <= start) end = start + 1
-      start = Math.max(0, start)
-      end = Math.min(bins, end)
-
-      let sum = 0
-      let count = 0
-
-      for (let i = start; i < end; i++) {
-        if (!dataArray) continue // ✅ guard for TS + runtime
-        const value = i < dataArray.length ? dataArray[i] ?? 0 : 0
-        sum += value
-        count++
+    let bassSum = 0
+    let bassCount = 0
+    for (let i = bassStart; i < bassEnd; i++) {
+      const v = freqArray[i]
+      if (v) {
+        bassSum += v
+        bassCount++
       }
-
-      return count > 0 ? sum / count : 0
     }
 
-    // --- compute band averages ---
-    const bassAvg = avgBand(bassRange)
-    const midAvg = avgBand(midRange)
+    let midSum = 0
+    let midCount = 0
+    for (let i = midStart; i < midEnd; i++) {
+      const v = freqArray[i]
+      if (v) {
+        midSum += v
+        midCount++
+      }
+    }
 
-    // normalize + curve
-    const bassRaw = bassAvg / 255
-    const midRaw = midAvg / 255
-    const bassTarget = Math.pow(bassRaw, 1.5)
-    const midTarget = Math.pow(midRaw, 1.2)
+    const bassAvg = bassCount ? bassSum / bassCount : 0
+    const midAvg = midCount ? midSum / midCount : 0
 
-    // smooth levels
-    bassLevel.value += (bassTarget - bassLevel.value) * levelSmoothing
-    midLevel.value += (midTarget - midLevel.value) * levelSmoothing
+    // raw 0..1 normalized energy
+    const bassNorm = bassAvg / 255
+    const midNorm = midAvg / 255
 
-    // update rolling average for beat detection
-    const avgSmooth = 0.02
-    bassRunningAvg += (bassTarget - bassRunningAvg) * avgSmooth
-
-    // --- beat detection ---
     const now = performance.now()
-    const threshold = bassRunningAvg * beatThresholdMul
-    const hit =
-      bassTarget > threshold && now - lastBeatTime > beatCooldownMs
 
-    if (hit) {
+    // 2) initial ramp: fade in visual sensitivity in first X ms
+    if (startTs === null && (bassNorm > 0.001 || midNorm > 0.001)) {
+      startTs = now
+    }
+    const ramp =
+      startTs === null
+        ? 0
+        : Math.min(1, (now - startTs) / cfg.rampDurationMs)
+
+    // 1) adaptive normalization: smoothed baseline over time
+    if (smoothedBass === 0 && smoothedMid === 0) {
+      smoothedBass = bassNorm
+      smoothedMid = midNorm
+      beatEnv = (bassNorm + midNorm) / 2
+    }
+
+    smoothedBass += (bassNorm - smoothedBass) * cfg.smoothingFactor
+    smoothedMid += (midNorm - smoothedMid) * cfg.smoothingFactor
+
+    const bassRel =
+      smoothedBass > EPS ? bassNorm / (smoothedBass + EPS) : 1
+    const midRel =
+      smoothedMid > EPS ? midNorm / (smoothedMid + EPS) : 1
+
+    // 4) log-ish compression curve on visible levels
+    const gamma = cfg.compressionGamma
+    const visualBassRaw = Math.pow(Math.max(0, bassNorm), gamma)
+    const visualMidRaw = Math.pow(Math.max(0, midNorm), gamma)
+
+    const visualBass = Math.min(1, visualBassRaw * ramp)
+    const visualMid = Math.min(1, visualMidRaw * ramp)
+
+    bassLevel.value = visualBass
+    midLevel.value = visualMid
+
+    // --- beat logic (relative to env) ---
+    const combined = bassRel * 0.7 + midRel * 0.3
+
+    if (beatEnv === 0) {
+      beatEnv = combined
+    } else {
+      beatEnv += (combined - beatEnv) * 0.1 // envelope smoothing
+    }
+
+    const sinceLastBeat = now - lastBeatTime
+    const thresholdFactor = cfg.beatThresholdMul
+    const target = beatEnv * thresholdFactor
+
+    const beatNow =
+      combined > target && sinceLastBeat > cfg.beatCooldownMs
+
+    if (beatNow) {
       lastBeatTime = now
-      beatBoost.value = 1
       isBeat.value = true
+      beatBoost.value = Math.max(beatBoost.value, combined - beatEnv)
     } else {
       isBeat.value = false
-      beatBoost.value *= beatDecay
-      if (beatBoost.value < 0.01) beatBoost.value = 0
+      // decay beat boost over time
+      beatBoost.value *= 0.9
+      if (beatBoost.value < 0.001) beatBoost.value = 0
     }
 
-    rafId.value = requestAnimationFrame(loop)
+    rafId = requestAnimationFrame(loop)
   }
 
-  const start = () => {
-    if (!analyserRef.value || rafId.value != null) return
-    lastBeatTime = performance.now()
-    rafId.value = requestAnimationFrame(loop)
-  }
-
-  const stop = () => {
-    if (rafId.value != null) {
-      cancelAnimationFrame(rafId.value)
-      rafId.value = null
+  // start/stop RAF when analyser appears/disappears
+  watchEffect(() => {
+    const analyser = analyserRef.value
+    if (analyser) {
+      if (!freqArray || freqArray.length !== analyser.frequencyBinCount) {
+        freqArray = new Uint8Array(analyser.frequencyBinCount)
+      }
+      if (rafId === null) {
+        rafId = requestAnimationFrame(loop)
+      }
+    } else {
+      stopLoop()
+      freqArray = null
     }
-  }
+  })
 
-  // auto start/stop with analyser
-  watch(
-    analyserRef,
-    (a) => {
-      if (a) start()
-      else stop()
-    },
-    { immediate: true }
-  )
-
-  onBeforeUnmount(stop)
-
-  // --- map levels to CSS filter ---
-  const imageFilter = computed(() => {
-    const baseBrightness = 1
-    const baseContrast = 1
-
-    // bass → brightness
-    const bassBright = 0.7
-    const beatBright = 0.8
-
-    // mids → contrast
-    const midContrast = 0.4
-    const beatContrast = 0.4
-
-    const b =
-      baseBrightness +
-      bassLevel.value * bassBright +
-      beatBoost.value * beatBright
-
-    const c =
-      baseContrast +
-      midLevel.value * midContrast +
-      beatBoost.value * beatContrast
-
-    return `brightness(${b}) contrast(${c})`
+  onBeforeUnmount(() => {
+    stopLoop()
   })
 
   return {
@@ -180,8 +214,6 @@ export function useBeatBrightness(
     midLevel,
     beatBoost,
     isBeat,
-    imageFilter,
-    start,
-    stop,
+    imageFilter
   }
 }
