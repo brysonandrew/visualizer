@@ -14,5 +14,6 @@
     {
       "path": "./.nuxt/tsconfig.node.json"
     }
-  ]
+  ],
+  "compilerOptions": { "types": ["@nuxtjs/toast"] }
 }

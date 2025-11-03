@@ -1,14 +1,12 @@
 // composables/useAudioVisualizer.ts
-import { ref, shallowRef, onBeforeUnmount } from 'vue'
+import { ref, shallowRef, onBeforeUnmount } from "vue"
 
-export type FrameCallback = (opts: {
-  analyser: AnalyserNode
-  freq: Uint8Array
-  time: Float32Array
-}) => void
+export type FrameCallback = (opts: { analyser: AnalyserNode; freq: Uint8Array; time: Float32Array }) => void
 
 export function useAudioVisualizer() {
-  const isClient = typeof window !== 'undefined'
+  const notification = useNotification()
+
+  const isClient = typeof window !== "undefined"
   const isPlaying = ref(false)
   const hasBuffer = ref(false)
 
@@ -20,8 +18,8 @@ export function useAudioVisualizer() {
   const buffer = shallowRef<AudioBuffer | null>(null)
 
   // playback state
-  const startTime = ref(0)         // when current play() began (ctx time)
-  const pauseOffset = ref(0)       // seconds into buffer when paused/stopped
+  const startTime = ref(0) // when current play() began (ctx time)
+  const pauseOffset = ref(0) // seconds into buffer when paused/stopped
 
   // analyser data buffers (you can reuse these each frame)
   const freq = shallowRef<Uint8Array | null>(null)
@@ -65,8 +63,12 @@ export function useAudioVisualizer() {
     if (!audioCtx.value || !buffer.value || !analyser.value) return
     // disconnect previous source if any
     if (source.value) {
-      try { source.value.disconnect() } catch {}
-      try { source.value.stop() } catch {}
+      try {
+        source.value.disconnect()
+      } catch {}
+      try {
+        source.value.stop()
+      } catch {}
     }
     const s = audioCtx.value.createBufferSource()
     s.buffer = buffer.value
@@ -77,11 +79,14 @@ export function useAudioVisualizer() {
   async function play() {
     ensureCtx()
     if (!audioCtx.value || !buffer.value || !analyser.value) return
-    if (audioCtx.value.state === 'suspended') {
+    if (audioCtx.value.state === "suspended") {
       await audioCtx.value.resume()
     }
     makeSource()
-    if (!source.value) return
+    if (!source.value) {
+      notification.error({ title: "Error", message: "No source." })
+      return
+    }
 
     startTime.value = audioCtx.value.currentTime - pauseOffset.value
     source.value.start(0, pauseOffset.value)
@@ -101,11 +106,10 @@ export function useAudioVisualizer() {
     if (!audioCtx.value || !source.value) return
     // compute elapsed into buffer, then stop and store offset
     const elapsed = audioCtx.value.currentTime - startTime.value
-    pauseOffset.value = Math.min(
-      elapsed,
-      buffer.value ? buffer.value.duration : elapsed
-    )
-    try { source.value.stop() } catch {}
+    pauseOffset.value = Math.min(elapsed, buffer.value ? buffer.value.duration : elapsed)
+    try {
+      source.value.stop()
+    } catch {}
     isPlaying.value = false
     stopRAF()
   }
@@ -113,7 +117,9 @@ export function useAudioVisualizer() {
   function stop() {
     if (!audioCtx.value) return
     if (source.value) {
-      try { source.value.stop() } catch {}
+      try {
+        source.value.stop()
+      } catch {}
     }
     isPlaying.value = false
     pauseOffset.value = 0
@@ -135,14 +141,19 @@ export function useAudioVisualizer() {
   }
 
   function startRAF() {
-    if (!analyser.value || rafId !== null || !freq.value || !time.value) return
+    if (!analyser.value || rafId !== null || !freq.value || !time.value) {
+      notification.error({ title: "Error", message: "Can't start RAF." })
+
+      return
+    }
     const a = analyser.value
     const f = freq.value as Uint8Array<ArrayBuffer>
     const t = time.value as Float32Array<ArrayBuffer>
     const loop = () => {
+      // console.log(f,t)
       a.getByteFrequencyData(f)
       a.getFloatTimeDomainData(t)
-      frameHandlers.forEach(cb => cb({ analyser: a, freq: f, time: t }))
+      frameHandlers.forEach((cb) => cb({ analyser: a, freq: f, time: t }))
       rafId = requestAnimationFrame(loop)
     }
     rafId = requestAnimationFrame(loop)
@@ -157,7 +168,9 @@ export function useAudioVisualizer() {
 
   onBeforeUnmount(() => {
     stop()
-    if (audioCtx.value) audioCtx.value.close()
+    if (audioCtx.value) {
+      audioCtx.value.close()
+    }
   })
 
   return {
@@ -167,9 +180,7 @@ export function useAudioVisualizer() {
     duration: computed(() => buffer.value?.duration ?? 0),
     position: computed(() => {
       if (!audioCtx.value) return 0
-      return isPlaying.value
-        ? audioCtx.value.currentTime - startTime.value
-        : pauseOffset.value
+      return isPlaying.value ? audioCtx.value.currentTime - startTime.value : pauseOffset.value
     }),
 
     // nodes / arrays
@@ -187,6 +198,6 @@ export function useAudioVisualizer() {
     setGain,
 
     // per-frame hook
-    onFrame,
+    onFrame
   }
 }
