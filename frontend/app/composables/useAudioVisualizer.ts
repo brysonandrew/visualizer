@@ -1,7 +1,14 @@
 // composables/useAudioVisualizer.ts
-import { ref, shallowRef, onBeforeUnmount } from "vue"
+import { ref, shallowRef, onBeforeUnmount, computed } from "vue"
 
-export type FrameCallback = (opts: { analyser: AnalyserNode; freq: Uint8Array; time: Float32Array }) => void
+export type FrameCallback = (opts: {
+  analyser: AnalyserNode
+  freq: Uint8Array<ArrayBuffer>
+  time: Float32Array<ArrayBuffer> | null
+}) => void
+
+// flip this to true if you ever actually use time-domain data
+const CAPTURE_TIME_DOMAIN = false
 
 export function useAudioVisualizer() {
   const notification = useNotification()
@@ -21,11 +28,11 @@ export function useAudioVisualizer() {
   const startTime = ref(0) // when current play() began (ctx time)
   const pauseOffset = ref(0) // seconds into buffer when paused/stopped
 
-  // analyser data buffers (you can reuse these each frame)
+  // analyser data buffers (reused each frame)
   const freq = shallowRef<Uint8Array | null>(null)
-  const time = shallowRef<Float32Array | null>(null)
+  const time = shallowRef<Float32Array<ArrayBuffer> | null>(null)
 
-  const level = ref(0) // 0..1 smoothed intensity
+  const level = ref(0) // 0..1 smoothed intensity (spare hook if you want it)
 
   // RAF loop
   let rafId: number | null = null
@@ -37,17 +44,27 @@ export function useAudioVisualizer() {
       audioCtx.value = new AudioContext()
       gain.value = audioCtx.value.createGain()
       analyser.value = audioCtx.value.createAnalyser()
-      analyser.value.fftSize = 2048
+
+      // 🔧 slightly cheaper + still detailed enough for visuals
+      analyser.value.fftSize = 1024 // was 2048
+      analyser.value.smoothingTimeConstant = 0.8
+      analyser.value.minDecibels = -85
+      analyser.value.maxDecibels = -10
 
       // default chain: (source) -> analyser -> gain -> destination
       analyser.value.connect(gain.value)
       gain.value.connect(audioCtx.value.destination)
 
-      // allocate analyser arrays
+      // allocate analyser arrays once
       const f = new Uint8Array(analyser.value.frequencyBinCount)
-      const t = new Float32Array(analyser.value.fftSize)
       freq.value = f
-      time.value = t
+
+      if (CAPTURE_TIME_DOMAIN) {
+        const t = new Float32Array(analyser.value.fftSize)
+        time.value = t
+      } else {
+        time.value = null
+      }
     }
   }
 
@@ -106,9 +123,11 @@ export function useAudioVisualizer() {
 
   function pause() {
     if (!audioCtx.value || !source.value) return
-    // compute elapsed into buffer, then stop and store offset
     const elapsed = audioCtx.value.currentTime - startTime.value
-    pauseOffset.value = Math.min(elapsed, buffer.value ? buffer.value.duration : elapsed)
+    pauseOffset.value = Math.min(
+      elapsed,
+      buffer.value ? buffer.value.duration : elapsed
+    )
     try {
       source.value.stop()
     } catch {}
@@ -130,7 +149,7 @@ export function useAudioVisualizer() {
 
   function toggle() {
     if (isPlaying.value) pause()
-    else play()
+    else void play()
   }
 
   function setGain(vol: number) {
@@ -143,18 +162,20 @@ export function useAudioVisualizer() {
   }
 
   function startRAF() {
-    if (!analyser.value || rafId !== null || !freq.value || !time.value) {
-      notification.error({ title: "Error", message: "Can't start RAF." })
-
+    if (!analyser.value || rafId !== null || !freq.value) {
+      // just bail; no need to spam notifications
       return
     }
     const a = analyser.value
     const f = freq.value as Uint8Array<ArrayBuffer>
-    const t = time.value as Float32Array<ArrayBuffer>
+    const t = (time.value ?? null) as Float32Array<ArrayBuffer> | null
+
     const loop = () => {
-      // console.log(f,t)
       a.getByteFrequencyData(f)
-      a.getFloatTimeDomainData(t)
+      if (CAPTURE_TIME_DOMAIN && t && time.value) {
+        a.getFloatTimeDomainData(time.value)
+      }
+
       frameHandlers.forEach((cb) => cb({ analyser: a, freq: f, time: t }))
       rafId = requestAnimationFrame(loop)
     }
@@ -182,7 +203,9 @@ export function useAudioVisualizer() {
     duration: computed(() => buffer.value?.duration ?? 0),
     position: computed(() => {
       if (!audioCtx.value) return 0
-      return isPlaying.value ? audioCtx.value.currentTime - startTime.value : pauseOffset.value
+      return isPlaying.value
+        ? audioCtx.value.currentTime - startTime.value
+        : pauseOffset.value
     }),
 
     // nodes / arrays
@@ -202,6 +225,7 @@ export function useAudioVisualizer() {
     // per-frame hook
     onFrame,
 
+    // for recorder / routing
     outputNode: gain
   }
 }

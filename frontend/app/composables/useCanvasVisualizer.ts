@@ -25,6 +25,15 @@ export function useCanvasVisualizer(
   let bgImg: HTMLImageElement | null = null
   let noiseImg: HTMLImageElement | null = null
 
+  // cached drawing state
+  let lastDpr = 0
+  let lastCanvasW = 0
+  let lastCanvasH = 0
+  let ctx: CanvasRenderingContext2D | null = null
+  let centerGrad: CanvasGradient | null = null
+  let edgeGrad: CanvasGradient | null = null
+  let grainPattern: CanvasPattern | null = null
+
   const loadImage = (src: string) =>
     new Promise<HTMLImageElement>((resolve, reject) => {
       const img = new Image()
@@ -60,33 +69,65 @@ export function useCanvasVisualizer(
     }
   }
 
-  const drawFrame = () => {
-    const canvas = canvasRef.value
-    if (!canvas) return
-
+  const setupCanvasIfNeeded = (canvas: HTMLCanvasElement) => {
     const dpr = window.devicePixelRatio || 1
     const targetW = canvasWidth
     const targetH = canvasHeight
 
-    // only reset size when needed (avoids clearing state every frame)
-    if (canvas.width !== targetW * dpr || canvas.height !== targetH * dpr) {
-      canvas.width = targetW * dpr
-      canvas.height = targetH * dpr
-    }
+    const needResize = canvas.width !== targetW * dpr || canvas.height !== targetH * dpr || dpr !== lastDpr
 
-    const ctx = canvas.getContext("2d")
+    if (!needResize && ctx) return
+
+    canvas.width = targetW * dpr
+    canvas.height = targetH * dpr
+    lastDpr = dpr
+    lastCanvasW = targetW
+    lastCanvasH = targetH
+
+    ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    // HiDPI transform: our drawing coords are now CSS pixels
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-
-    // nicer scaling
     ctx.imageSmoothingEnabled = true
     // @ts-ignore
     ctx.imageSmoothingQuality = "high"
 
+    // (re)build gradients for this size
     const width = targetW
     const height = targetH
+    const cx = width / 2
+    const cy = height / 2
+
+    // center glow shape
+    const centerRadius = Math.max(width, height) * 0.6
+    const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, centerRadius)
+    cg.addColorStop(0, "rgba(227,165,58,1)")
+    cg.addColorStop(0.6, "rgba(227,165,58,0.5)")
+    cg.addColorStop(1, "transparent")
+    centerGrad = cg
+
+    // edge glow shape
+    const edgeRadius = Math.max(width, height)
+    const eg = ctx.createRadialGradient(cx, cy, 0, cx, cy, edgeRadius)
+    eg.addColorStop(0, "transparent")
+    eg.addColorStop(0.45, "transparent")
+    eg.addColorStop(0.65, "rgba(227,165,58,0.5)")
+    eg.addColorStop(1, "rgba(227,165,58,1)")
+    edgeGrad = eg
+
+    // reset grainPattern so it can be recreated with this context
+    grainPattern = null
+  }
+
+  const drawFrame = () => {
+    const canvas = canvasRef.value
+    if (!canvas) return
+
+    setupCanvasIfNeeded(canvas)
+    if (!ctx) return
+
+    const width = lastCanvasW
+    const height = lastCanvasH
 
     ctx.clearRect(0, 0, width, height)
 
@@ -94,20 +135,17 @@ export function useCanvasVisualizer(
     if (bgImg) {
       ctx.save()
 
+      const overscan = 1.1 // 👈 10% bigger to hide rotation edges
+
       const scaleBase = 1.0
       const scaleBeat = state.isBeat.value ? 1.03 : 1.0
       const scale = scaleBase * scaleBeat
 
-      const angleDeg = state.isBeat.value
-        ? state.midLevel.value * 2
-        : state.midLevel.value * 1.5
+      const angleDeg = state.isBeat.value ? state.midLevel.value * 2 : state.midLevel.value * 1.5
       const angle = (angleDeg * Math.PI) / 180
 
-      // gentler brightness/contrast
-      const brightness =
-        1 + state.bassLevel.value * 0.35 + state.beatBoost.value * 0.45
-      const contrast =
-        1 + state.midLevel.value * 0.25 + state.beatBoost.value * 0.25
+      const brightness = 1 + state.bassLevel.value * 0.35 + state.beatBoost.value * 0.45
+      const contrast = 1 + state.midLevel.value * 0.25 + state.beatBoost.value * 0.25
 
       ctx.filter = `brightness(${brightness}) contrast(${contrast})`
 
@@ -127,69 +165,41 @@ export function useCanvasVisualizer(
         drawH = width / imgRatio
       }
 
+      // 🔍 overscan so rotation never reveals background
+      drawW *= overscan
+      drawH *= overscan
+
       ctx.drawImage(bgImg, -drawW / 2, -drawH / 2, drawW, drawH)
       ctx.restore()
     }
 
-    // ✨ center glow
     if (bgImg) {
+      const cx = width / 2
+      const cy = height / 2
+
+      // one screen composite block for both glows
       ctx.save()
       ctx.globalCompositeOperation = "screen"
 
-      const cx = width / 2
-      const cy = height / 2
-      const radius = Math.max(width, height) * 0.6
-
+      // ✨ center glow
       const centerIntensity = Math.min(
         1,
-        state.midLevel.value * 0.9 +
-          state.bassLevel.value * 0.15 +
-          state.beatBoost.value * 0.7
+        state.midLevel.value * 0.9 + state.bassLevel.value * 0.15 + state.beatBoost.value * 0.7
       )
-
-      if (centerIntensity > 0) {
-        const innerAlpha = 0.4 * centerIntensity
-        const midAlpha = 0.2 * centerIntensity
-
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
-        grad.addColorStop(0, `rgba(227,165,58,${innerAlpha})`)
-        grad.addColorStop(0.6, `rgba(227,165,58,${midAlpha})`)
-        grad.addColorStop(1, "transparent")
-
-        ctx.fillStyle = grad
+      if (centerIntensity > 0 && centerGrad) {
+        ctx.globalAlpha = centerIntensity * 0.6 // scale strength
+        ctx.fillStyle = centerGrad
         ctx.fillRect(0, 0, width, height)
       }
 
-      ctx.restore()
-    }
-
-    // 🌌 edge glow
-    if (bgImg) {
-      ctx.save()
-      ctx.globalCompositeOperation = "screen"
-
-      const cx = width / 2
-      const cy = height / 2
-      const radius = Math.max(width, height)
-
+      // 🌌 edge glow
       const edgeIntensity = Math.min(
         1,
-        state.bassLevel.value * 0.6 +
-          state.midLevel.value * 0.2 +
-          state.beatBoost.value * 1.0
+        state.bassLevel.value * 0.6 + state.midLevel.value * 0.2 + state.beatBoost.value * 1.0
       )
-
-      if (edgeIntensity > 0) {
-        const innerAlpha = 0.12 * edgeIntensity
-        const outerAlpha = 0.45 * edgeIntensity
-
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
-        grad.addColorStop(0, "transparent")
-        grad.addColorStop(0.45, "transparent")
-        grad.addColorStop(0.65, `rgba(227,165,58,${innerAlpha})`)
-        grad.addColorStop(1, `rgba(227,165,58,${outerAlpha})`)
-
-        ctx.fillStyle = grad
+      if (edgeIntensity > 0 && edgeGrad) {
+        ctx.globalAlpha = edgeIntensity * 0.5
+        ctx.fillStyle = edgeGrad
         ctx.fillRect(0, 0, width, height)
       }
 
@@ -204,9 +214,7 @@ export function useCanvasVisualizer(
       const bassWeight = 0.2
       const beatWeight = 0.7
 
-      const tonal =
-        state.midLevel.value * midWeight +
-        state.bassLevel.value * bassWeight
+      const tonal = state.midLevel.value * midWeight + state.bassLevel.value * bassWeight
       const punch = state.beatBoost.value * beatWeight
       const raw = baseOpacity + tonal + punch
       const grainOpacity = Math.min(maxOpacity, Math.max(0, raw))
@@ -216,9 +224,12 @@ export function useCanvasVisualizer(
         ctx.globalCompositeOperation = "soft-light"
         ctx.globalAlpha = grainOpacity
 
-        const pattern = ctx.createPattern(noiseImg, "repeat")
-        if (pattern) {
-          ctx.fillStyle = pattern
+        if (!grainPattern) {
+          grainPattern = ctx.createPattern(noiseImg, "repeat")
+        }
+
+        if (grainPattern) {
+          ctx.fillStyle = grainPattern
           ctx.fillRect(0, 0, width, height)
         }
 
