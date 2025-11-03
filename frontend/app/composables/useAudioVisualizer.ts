@@ -200,6 +200,8 @@ export function useAudioVisualizer() {
     setGain,
 
     // per-frame hook
-    onFrame
+    onFrame,
+
+    outputNode: gain
   }
 }

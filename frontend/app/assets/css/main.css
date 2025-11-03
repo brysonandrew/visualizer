@@ -13,7 +13,7 @@
 .noise-overlay {
   pointer-events: none;
   mix-blend-mode: soft-light; /* or overlay, or screen for harsher */
-  background-image: url("../auroscuro-noise.png");
+  background-image: url("/white-noise.png");
   background-size: cover;
   background-repeat: repeat;
   opacity: 0.15; /* will be overridden by :style opacity */
