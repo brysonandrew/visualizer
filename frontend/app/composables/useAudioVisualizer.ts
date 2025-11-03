@@ -25,6 +25,8 @@ export function useAudioVisualizer() {
   const freq = shallowRef<Uint8Array | null>(null)
   const time = shallowRef<Float32Array | null>(null)
 
+  const level = ref(0) // 0..1 smoothed intensity
+
   // RAF loop
   let rafId: number | null = null
   const frameHandlers = new Set<FrameCallback>()

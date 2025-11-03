@@ -1,0 +1,5 @@
+{
+  "name": "auroscuro",
+  "private": true,
+  "workspaces": ["frontend", "backend"]
+}

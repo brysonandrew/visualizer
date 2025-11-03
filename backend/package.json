@@ -1,0 +1,13 @@
+{
+  "type": "module",
+  "scripts": {
+    "white-noise": "npx tsx white-noise.ts",
+    "auroscuro-noise": "npx tsx auroscuro-noise.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  },
+  "dependencies": {
+    "canvas": "^3.2.0"
+  }
+}
