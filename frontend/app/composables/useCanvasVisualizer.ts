@@ -1,8 +1,13 @@
 // composables/useCanvasVisualizer.ts
 import { watch, onBeforeUnmount, type Ref } from "vue"
 
+// aspect ratio / dimensions for canvas-space in CSS pixels
+const aspectKey = "16:9" as const
+const canvasWidth = DIMENSIONS_FROM_ASPECT_RATIO_LOOKUP[aspectKey].width
+const canvasHeight = DIMENSIONS_FROM_ASPECT_RATIO_LOOKUP[aspectKey].height
+
 type UseCanvasVisualizerOptions = {
-  noiseImageUrl?: string
+  noiseImageUrl: string | null
 }
 
 export function useCanvasVisualizer(
@@ -14,11 +19,8 @@ export function useCanvasVisualizer(
     midLevel: Ref<number>
     beatBoost: Ref<number>
     isBeat: Ref<boolean>
-    grainOpacity: Ref<number>
   }
 ) {
-  const { noiseImageUrl = DEFAULT_NOISE_PATH } = opts
-
   let rafId: number | null = null
   let bgImg: HTMLImageElement | null = null
   let noiseImg: HTMLImageElement | null = null
@@ -31,14 +33,16 @@ export function useCanvasVisualizer(
       img.src = src
     })
 
-  // load noise once
-  loadImage(noiseImageUrl)
-    .then((img) => {
-      noiseImg = img
-    })
-    .catch(() => {
-      noiseImg = null
-    })
+  // load noise once (optional)
+  if (opts.noiseImageUrl) {
+    loadImage(opts.noiseImageUrl)
+      .then((img) => {
+        noiseImg = img
+      })
+      .catch(() => {
+        noiseImg = null
+      })
+  }
 
   const startLoop = () => {
     if (rafId !== null) return
@@ -59,30 +63,51 @@ export function useCanvasVisualizer(
   const drawFrame = () => {
     const canvas = canvasRef.value
     if (!canvas) return
+
+    const dpr = window.devicePixelRatio || 1
+    const targetW = canvasWidth
+    const targetH = canvasHeight
+
+    // only reset size when needed (avoids clearing state every frame)
+    if (canvas.width !== targetW * dpr || canvas.height !== targetH * dpr) {
+      canvas.width = targetW * dpr
+      canvas.height = targetH * dpr
+    }
+
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    const { width, height } = canvas
+    // HiDPI transform: our drawing coords are now CSS pixels
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+    // nicer scaling
+    ctx.imageSmoothingEnabled = true
+    // @ts-ignore
+    ctx.imageSmoothingQuality = "high"
+
+    const width = targetW
+    const height = targetH
 
     ctx.clearRect(0, 0, width, height)
 
-    // background
+    // 🖼 background image
     if (bgImg) {
       ctx.save()
 
-      // match your DOM transform logic
       const scaleBase = 1.0
       const scaleBeat = state.isBeat.value ? 1.03 : 1.0
       const scale = scaleBase * scaleBeat
 
-      const angleDeg = state.isBeat.value ? state.midLevel.value * 2 : state.midLevel.value * 1.5
+      const angleDeg = state.isBeat.value
+        ? state.midLevel.value * 2
+        : state.midLevel.value * 1.5
       const angle = (angleDeg * Math.PI) / 180
 
-      // approximate brightness/contrast from your imageFilter
-      // const brightness = 1 + state.bassLevel.value * 0.7 + state.beatBoost.value * 0.8
-      // const contrast = 1 + state.midLevel.value * 0.4 + state.beatBoost.value * 0.4
-      const brightness = 1 + state.bassLevel.value * 0.35 + state.beatBoost.value * 0.45
-      const contrast = 1 + state.midLevel.value * 0.25 + state.beatBoost.value * 0.25
+      // gentler brightness/contrast
+      const brightness =
+        1 + state.bassLevel.value * 0.35 + state.beatBoost.value * 0.45
+      const contrast =
+        1 + state.midLevel.value * 0.25 + state.beatBoost.value * 0.25
 
       ctx.filter = `brightness(${brightness}) contrast(${contrast})`
 
@@ -106,7 +131,7 @@ export function useCanvasVisualizer(
       ctx.restore()
     }
 
-    // center glow
+    // ✨ center glow
     if (bgImg) {
       ctx.save()
       ctx.globalCompositeOperation = "screen"
@@ -114,18 +139,17 @@ export function useCanvasVisualizer(
       const cx = width / 2
       const cy = height / 2
       const radius = Math.max(width, height) * 0.6
-      const intensity = Math.min(
+
+      const centerIntensity = Math.min(
         1,
-        state.midLevel.value * 0.9 + state.bassLevel.value * 0.15 + state.beatBoost.value * 0.7
+        state.midLevel.value * 0.9 +
+          state.bassLevel.value * 0.15 +
+          state.beatBoost.value * 0.7
       )
 
-      if (intensity > 0) {
-        // center glow
-        const innerAlpha = 0.4 * intensity
-        const midAlpha = 0.2 * intensity
-
-        // const innerAlpha = 0.8 * intensity
-        // const midAlpha = 0.4 * intensity
+      if (centerIntensity > 0) {
+        const innerAlpha = 0.4 * centerIntensity
+        const midAlpha = 0.2 * centerIntensity
 
         const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius)
         grad.addColorStop(0, `rgba(227,165,58,${innerAlpha})`)
@@ -139,7 +163,7 @@ export function useCanvasVisualizer(
       ctx.restore()
     }
 
-    // edge glow
+    // 🌌 edge glow
     if (bgImg) {
       ctx.save()
       ctx.globalCompositeOperation = "screen"
@@ -147,15 +171,15 @@ export function useCanvasVisualizer(
       const cx = width / 2
       const cy = height / 2
       const radius = Math.max(width, height)
+
       const edgeIntensity = Math.min(
         1,
-        state.bassLevel.value * 0.6 + state.midLevel.value * 0.2 + state.beatBoost.value * 1.0
+        state.bassLevel.value * 0.6 +
+          state.midLevel.value * 0.2 +
+          state.beatBoost.value * 1.0
       )
 
       if (edgeIntensity > 0) {
-        // const innerAlpha = 0.25 * edgeIntensity
-        // const outerAlpha = 0.85 * edgeIntensity
-
         const innerAlpha = 0.12 * edgeIntensity
         const outerAlpha = 0.45 * edgeIntensity
 
@@ -172,18 +196,43 @@ export function useCanvasVisualizer(
       ctx.restore()
     }
 
-    // grain
-    if (bgImg && noiseImg && state.grainOpacity.value > 0.01) {
-      ctx.save()
-      ctx.globalCompositeOperation = "soft-light"
-      ctx.globalAlpha = state.grainOpacity.value
+    // 🧱 grain (optional)
+    if (bgImg && noiseImg) {
+      const baseOpacity = 0.05
+      const maxOpacity = 0.4
+      const midWeight = 0.8
+      const bassWeight = 0.2
+      const beatWeight = 0.7
 
-      const pattern = ctx.createPattern(noiseImg, "repeat")
-      if (pattern) {
-        ctx.fillStyle = pattern
-        ctx.fillRect(0, 0, width, height)
+      const tonal =
+        state.midLevel.value * midWeight +
+        state.bassLevel.value * bassWeight
+      const punch = state.beatBoost.value * beatWeight
+      const raw = baseOpacity + tonal + punch
+      const grainOpacity = Math.min(maxOpacity, Math.max(0, raw))
+
+      if (grainOpacity > 0.01) {
+        ctx.save()
+        ctx.globalCompositeOperation = "soft-light"
+        ctx.globalAlpha = grainOpacity
+
+        const pattern = ctx.createPattern(noiseImg, "repeat")
+        if (pattern) {
+          ctx.fillStyle = pattern
+          ctx.fillRect(0, 0, width, height)
+        }
+
+        ctx.restore()
       }
+    }
 
+    // 🎛 optional mild global desaturation
+    if (bgImg) {
+      ctx.save()
+      ctx.globalCompositeOperation = "saturation"
+      ctx.globalAlpha = 0.2
+      ctx.fillStyle = "gray"
+      ctx.fillRect(0, 0, width, height)
       ctx.restore()
     }
   }

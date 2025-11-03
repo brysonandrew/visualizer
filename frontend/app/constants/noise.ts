@@ -1,1 +1,3 @@
-export const DEFAULT_NOISE_PATH  = "/white-noise.png"
+export const DEFAULT_NOISE_PATH  = null
+// "/auroscuro-noise.png"
+// "/white-noise.png"

@@ -6,6 +6,7 @@ const notification = useNotification()
 
 const { url: background, setFromFile: setBackground } = useTempUrl()
 const isCanvasShown = ref(true)
+
 const {
   isPlaying,
   hasBuffer,
@@ -14,10 +15,11 @@ const {
   onFrame,
   analyser,
   freq,
-  audioCtx, // ⚠️ make sure useAudioVisualizer exposes these
+  audioCtx, // from useAudioVisualizer
   outputNode // master gain / final node
 } = useAudioVisualizer()
 
+// 🔊 Core audio analysis (shared by DOM + Canvas)
 const { bassLevel, midLevel, beatBoost, isBeat, imageFilter } = useBeatBrightness(analyser, {
   bassRange: [0.0, 0.12],
   midRange: [0.12, 0.5],
@@ -25,35 +27,11 @@ const { bassLevel, midLevel, beatBoost, isBeat, imageFilter } = useBeatBrightnes
   beatCooldownMs: 110
 })
 
-// 🌌 Edge glow: bass-heavy ring
-const { edgeIntensity, edgeGlowStyle } = useEdgeGlow(bassLevel, midLevel, beatBoost, {
-  color: { r: 227, g: 165, b: 58 },
-  bassWeight: 0.6,
-  midWeight: 0.2,
-  beatWeight: 1.0
-})
-
-// ✨ Center glow: mid-driven core
-const { centerIntensity, centerGlowStyle } = useCenterGlow(bassLevel, midLevel, beatBoost, {
-  color: { r: 227, g: 165, b: 58 },
-  midWeight: 0.9,
-  bassWeight: 0.15,
-  beatWeight: 0.7,
-  innerRadiusStop: 0.0,
-  outerRadiusStop: 0.6
-})
-
-// 🧱 Grain overlay: mostly mids + a bit of bass + beats
-const { grainOpacity, grainStyle } = useGrainOverlay(bassLevel, midLevel, beatBoost, {
-  baseOpacity: 0.05,
-  maxOpacity: 0.4,
-  midWeight: 0.8,
-  bassWeight: 0.2,
-  beatWeight: 0.7
-})
-
 // 🎥 Canvas used for parallel visualizer (for silent recording)
 const recordCanvas = ref<HTMLCanvasElement | null>(null)
+const setRecordCanvas = (el: HTMLCanvasElement | null) => {
+  recordCanvas.value = el
+}
 
 useCanvasVisualizer(
   recordCanvas,
@@ -63,11 +41,9 @@ useCanvasVisualizer(
     bassLevel,
     midLevel,
     beatBoost,
-    isBeat,
-    grainOpacity
+    isBeat
   }
 )
-
 // 🎥 Silent canvas recorder
 const {
   isRecording,
@@ -142,17 +118,17 @@ const sources = computed(() => {
     ["🎧 audio", hasBuffer.value]
   ] as const
 })
+
+
 </script>
 
 <template>
   <ClientOnly>
-    <div
-      class="relative w-screen h-screen overflow-auto text-white bg-black hover:bg-slate-950 select-none"
-    >
+    <div class="relative w-screen h-screen overflow-auto text-white bg-black hover:bg-slate-950 select-none">
       <!-- 🎛️ UI / Controls (top-left) -->
       <div class="flex flex-col gap-4 fixed top-4 left-4 bg-slate-800 p-2 rounded-md z-20">
         <ul>
-          <li v-for="[title, isValue] in sources" :class="clsx('', !isValue && 'text-slate-400')">
+          <li v-for="[title, isValue] in sources" :key="title" :class="clsx('', !isValue && 'text-slate-400')">
             {{ title }} {{ isValue ? "✅" : "required" }}
           </li>
         </ul>
@@ -184,77 +160,44 @@ const sources = computed(() => {
           <span v-if="isRecording" class="text-rose-400 ml-1"> Recording… </span>
         </div>
 
-        <button :class="clsx('p-1.5 bg-slate-900 cursor-pointer disabled:text-slate-400 disabled:cursor-not-allowed')" @click="() => {
-          isCanvasShown = !isCanvasShown
-        }">
+        <button
+          :class="clsx('p-1.5 bg-slate-900 cursor-pointer disabled:text-slate-400 disabled:cursor-not-allowed')"
+          @click="isCanvasShown = !isCanvasShown"
+        >
           Show {{ isCanvasShown ? "DOM" : "Canvas" }}
         </button>
-
         <p>⎵ spacebar to start/stop.</p>
       </div>
 
-      <!-- 🧠 Debug HUD -->
-      <div class="fixed bottom-4 left-4 text-xs bg-black/60 px-3 py-2 rounded z-20">
+      <!-- 🧠 Debug HUD: only core audio values (composables used in both modes) -->
+      <div v-if="!isRecording" class="fixed bottom-4 left-4 text-xs bg-black/60 px-3 py-2 rounded z-20">
         <div>bass: {{ bassLevel.toFixed(2) }}</div>
         <div>mids: {{ midLevel.toFixed(2) }}</div>
         <div>beatBoost: {{ beatBoost.toFixed(2) }}</div>
-        <div>edgeIntensity: {{ edgeIntensity.toFixed(2) }}</div>
-        <div>centerIntensity: {{ centerIntensity.toFixed(2) }}</div>
-        <div>grainOpacity: {{ grainOpacity.toFixed(2) }}</div>
         <div>isBeat: {{ isBeat ? "yes" : "no" }}</div>
       </div>
 
-      <!-- 🎥 canvas used for parallel rendering / recording -->
-      <canvas
+      <!-- 🎥 Canvas visualizer (no DOM composables) -->
+      <VisualizerCanvas
         v-if="isCanvasShown"
-        ref="recordCanvas"
-        :class="
-          clsx(
-            // 'hidden'
-            'inset-0 absolute'
-          )
-        "
-        v-bind="DIMENSIONS_FROM_ASPECT_RATIO_LOOKUP['16:9']"
-      ></canvas>
-      <div v-else>
-        <!-- 🖼 Base image -->
-        <img
-          v-if="background"
-          class="absolute inset-0 w-full h-full object-cover z-0"
-          :style="{
-            filter: imageFilter,
-            transform: isBeat
-              ? `scale(1.03) rotate(${(midLevel * 2).toFixed(2)}deg)`
-              : `scale(1.0) rotate(${(midLevel * 1.5).toFixed(2)}deg)`
-          }"
-          :src="background"
-          alt="background"
-        />
+        :on-canvas-ready="setRecordCanvas"
+      />
 
-        <!-- ✨ Center glow overlay (mid-driven core) -->
-        <div
-          v-if="background"
-          class="absolute inset-0 pointer-events-none mix-blend-screen transition-opacity duration-75 z-10"
-          :style="centerGlowStyle"
-        ></div>
-
-        <!-- 🌌 Edge glow overlay (bass-heavy ring) -->
-        <div
-          v-if="background"
-          class="absolute inset-0 pointer-events-none mix-blend-screen transition-opacity duration-75 z-10"
-          :style="edgeGlowStyle"
-        ></div>
-
-        <!-- 🧱 Grain overlay (texture, mostly mids) -->
-        <div
-          v-if="background"
-          class="absolute inset-0 noise-overlay transition-opacity duration-75 z-10"
-          :style="grainStyle"
-        ></div>
-      </div>
+      <!-- 🖼 DOM visualizer (DOM composables live here) -->
+      <VisualizerDom
+        v-else
+        :background="background"
+        :image-filter="imageFilter"
+        :is-beat="isBeat"
+        :bass-level="bassLevel"
+        :mid-level="midLevel"
+        :beat-boost="beatBoost"
+      />
 
       <!-- 📁 Idle upload prompt -->
-      <div class="fixed left-1/2 -translate-y-1/2 top-1/2 -translate-x-1/2 text-xl flex flex-col items-center gap-4 z-0">
+      <div
+        class="fixed left-1/2 -translate-y-1/2 top-1/2 -translate-x-1/2 text-xl flex flex-col items-center gap-4 z-0"
+      >
         <div class="text-4xl">📁</div>
         <div><b>Choose</b> or <b>drag</b> 🎧 🎇 here.</div>
       </div>

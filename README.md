@@ -41,7 +41,7 @@ Perfect for turning your Auroscuro tracks into TikTok / Reels / Shorts / YouTube
 **Backend**
 
 - Node + [tsx](https://github.com/esbuild-kit/tsx) to run TypeScript/ESM scripts
-- Noise generator scripts (e.g. `generate-noise.ts`, `generate-auroscuro-noise.ts`) that output PNG textures used by the frontend (`/public/noise.png`).
+- Noise generator scripts (e.g. `generate-noise.ts`, `generate-auroscuro-noise.ts`) that output PNG textures used by the frontend (`/public/white-noise.png`).
 
 ---
 
